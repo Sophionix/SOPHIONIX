@@ -1,0 +1,91 @@
+name: Ops - CloudFront Fix
+
+# One-off ops helper, dispatched manually. Runs on the self-hosted runner so it
+# uses the EC2 instance's own IAM role. "check" only reports whether that role
+# can see the distribution; "apply" repoints the origin at this box's current
+# public IP and switches the default behavior to CachingDisabled + AllViewer so
+# cookies (CSRF + session) reach the origin. No checkout — it needs nothing from
+# the repo tree.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check = report access only, apply = attempt the fix"
+        type: choice
+        options:
+          - check
+          - apply
+        default: check
+
+jobs:
+  cloudfront:
+    runs-on: self-hosted
+    steps:
+    - name: Inspect and optionally fix CloudFront
+      env:
+        CF_DOMAIN: d2bags9w7bkgzw.cloudfront.net
+        CACHE_DISABLED: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"   # managed CachingDisabled
+        ALL_VIEWER: "216adef6-5c7f-47e4-b989-5492eafa07d3"       # managed AllViewer
+      run: |
+        set -uo pipefail
+
+        echo "::group::AWS identity of the instance role"
+        if ! aws sts get-caller-identity; then
+          echo "::error::No AWS credentials available on this host — cannot touch CloudFront from here."
+          exit 1
+        fi
+        echo "::endgroup::"
+
+        echo "::group::Can this role see the distribution?"
+        DID=$(aws cloudfront list-distributions \
+          --query "DistributionList.Items[?DomainName=='${CF_DOMAIN}'].Id | [0]" \
+          --output text 2>/tmp/cferr) || true
+        if [ -z "${DID:-}" ] || [ "$DID" = "None" ]; then
+          echo "::warning::This instance role cannot list/find the distribution:"
+          cat /tmp/cferr || true
+          echo "The CloudFront change must be done from an account/role that has CloudFront admin."
+          exit 1
+        fi
+        echo "Distribution: $DID"
+        echo "::endgroup::"
+
+        if [ "${{ inputs.mode }}" != "apply" ]; then
+          echo "check-only mode — access confirmed, not applying. Re-run with mode=apply to fix."
+          exit 0
+        fi
+
+        command -v jq >/dev/null 2>&1 || sudo dnf install -y jq
+
+        # Current public IP of this box (IMDSv2).
+        TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+          -H "X-aws-ec2-metadata-token-ttl-seconds: 120")
+        IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+          http://169.254.169.254/latest/meta-data/public-ipv4)
+        echo "This box's public IP: $IP"
+
+        aws cloudfront get-distribution-config --id "$DID" > /tmp/dist.json
+        ETAG=$(jq -r '.ETag' /tmp/dist.json)
+        echo "Current origin: $(jq -r '.DistributionConfig.Origins.Items[0].DomainName' /tmp/dist.json)"
+
+        jq --arg ip "$IP" --arg cache "$CACHE_DISABLED" --arg orp "$ALL_VIEWER" '
+          .DistributionConfig
+          | .Origins.Items[0].DomainName = $ip
+          | .Origins.Items[0].CustomOriginConfig.HTTPPort = 80
+          | .Origins.Items[0].CustomOriginConfig.OriginProtocolPolicy = "http-only"
+          | .DefaultCacheBehavior.CachePolicyId = $cache
+          | .DefaultCacheBehavior.OriginRequestPolicyId = $orp
+          | del(.DefaultCacheBehavior.ForwardedValues,
+                .DefaultCacheBehavior.MinTTL,
+                .DefaultCacheBehavior.DefaultTTL,
+                .DefaultCacheBehavior.MaxTTL)
+          | .DefaultCacheBehavior.ViewerProtocolPolicy = "redirect-to-https"
+          | .DefaultCacheBehavior.AllowedMethods.Quantity = 7
+          | .DefaultCacheBehavior.AllowedMethods.Items = ["GET","HEAD","OPTIONS","PUT","POST","PATCH","DELETE"]
+          | .DefaultCacheBehavior.AllowedMethods.CachedMethods.Quantity = 2
+          | .DefaultCacheBehavior.AllowedMethods.CachedMethods.Items = ["GET","HEAD"]
+        ' /tmp/dist.json > /tmp/newconf.json
+
+        aws cloudfront update-distribution --id "$DID" --if-match "$ETAG" \
+          --distribution-config file:///tmp/newconf.json >/dev/null
+        echo "Applied. CloudFront redeploys in ~3-5 min, then login through the CDN will work."

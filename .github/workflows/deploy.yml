@@ -1,0 +1,244 @@
+name: Sophionix Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Reclaim disk space
+      # The runner shares an 8GB root volume with MySQL, Redis and the app, so
+      # package caches alone can starve a build. Caches only — nothing here
+      # touches app files, node_modules or .next output.
+      run: |
+        echo "Before:"; df -h / | tail -1
+        yarn cache clean --all 2>/dev/null || rm -rf ~/.yarn/berry/cache || true
+        rm -rf ~/.npm/_cacache || true
+        npx pm2 flush || true
+        sudo journalctl --vacuum-size=20M 2>/dev/null || true
+        sudo find /var/log -name "*.gz" -o -name "*.[0-9]" 2>/dev/null | xargs -r sudo rm -f || true
+        rm -rf ~/actions-runner/_diag/*.log || true
+        echo "After:"; df -h / | tail -1
+
+    - name: Guard against a full disk
+      run: |
+        AVAIL_MB=$(df --output=avail -BM / | tail -1 | tr -dc '0-9')
+        echo "Free space on /: ${AVAIL_MB}MB"
+        if [ "$AVAIL_MB" -lt 2048 ]; then
+          echo "::error::Only ${AVAIL_MB}MB free on / — need 2048MB to build safely."
+          echo "::error::Cleanup ran and was not enough. Grow the EBS volume (8GB is undersized for this host)."
+          exit 1
+        fi
+
+    - name: Use Node.js 22
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Enable Corepack
+      run: corepack enable
+
+    - name: Installing dependencies
+      run: yarn install --immutable
+
+    - name: Quality Gate (Typecheck & Lint)
+      run: |
+        yarn typecheck
+        yarn lint
+
+    - name: Prisma validation
+      run: |
+        yarn prisma:validate
+        yarn prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --exit-code || true
+
+    - name: Set up environment variables
+      # Writes .env BEFORE the build on purpose: `next build` copies .env into
+      # .next/standalone/, and that copy is what server.js reads at runtime.
+      # Passing these only as step env would satisfy the build and still leave
+      # the deployed app throwing "Invalid environment" on boot.
+      env:
+        NODE_ENV: 'production'
+        NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
+        AUTH_URL: ${{ vars.AUTH_URL }}
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        REDIS_URL: ${{ vars.REDIS_URL }}
+        PORT: ${{ vars.PORT }}
+        AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+        AUTH_TRUST_HOST: ${{ vars.AUTH_TRUST_HOST }}
+        AUTH_GOOGLE_ID: ${{ secrets.AUTH_GOOGLE_ID }}
+        AUTH_GOOGLE_SECRET: ${{ secrets.AUTH_GOOGLE_SECRET }}
+        TOTP_SECRET_KEY: ${{ secrets.TOTP_SECRET_KEY }}
+        TOTP_ISSUER: ${{ vars.TOTP_ISSUER }}
+        WEBAUTHN_RP_ID: ${{ vars.WEBAUTHN_RP_ID }}
+        WEBAUTHN_RP_NAME: ${{ vars.WEBAUTHN_RP_NAME }}
+        WEBAUTHN_ORIGIN: ${{ vars.WEBAUTHN_ORIGIN }}
+        FEATURE_WEBAUTHN: ${{ vars.FEATURE_WEBAUTHN }}
+        RECAPTCHA_SECRET_KEY: ${{ vars.RECAPTCHA_SECRET_KEY }}
+        RECAPTCHA_MIN_SCORE: ${{ vars.RECAPTCHA_MIN_SCORE }}
+        CSP_RELAX_FOR_HTTP: ${{ vars.CSP_RELAX_FOR_HTTP }}
+        STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+        STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+        STRIPE_API_VERSION: ${{ vars.STRIPE_API_VERSION }}
+        CARD_UNLOCK_PRICE_CENTS: ${{ vars.CARD_UNLOCK_PRICE_CENTS }}
+        CARD_UNLOCK_CURRENCY: ${{ vars.CARD_UNLOCK_CURRENCY }}
+        STRIPE_CHECKOUT_SUCCESS_URL: ${{ vars.STRIPE_CHECKOUT_SUCCESS_URL }}
+        STRIPE_CHECKOUT_CANCEL_URL: ${{ vars.STRIPE_CHECKOUT_CANCEL_URL }}
+        FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        FIREBASE_STORAGE_BUCKET: ${{ vars.FIREBASE_STORAGE_BUCKET }}
+        S3_BUCKET: ${{ vars.S3_BUCKET }}
+        S3_REGION: ${{ vars.S3_REGION }}
+        S3_ACCESS_URL: ${{ vars.S3_ACCESS_URL }}
+        UPLOAD_URL_TTL: ${{ vars.UPLOAD_URL_TTL }}
+        NEXT_PUBLIC_FIREBASE_API_KEY: ${{ vars.NEXT_PUBLIC_FIREBASE_API_KEY }}
+        NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${{ vars.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN }}
+        NEXT_PUBLIC_FIREBASE_PROJECT_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_PROJECT_ID }}
+        NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: ${{ vars.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET }}
+        NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID }}
+        NEXT_PUBLIC_FIREBASE_APP_ID: ${{ vars.NEXT_PUBLIC_FIREBASE_APP_ID }}
+        NEXT_PUBLIC_FIREBASE_VAPID_KEY: ${{ vars.NEXT_PUBLIC_FIREBASE_VAPID_KEY }}
+        UPLOAD_MAX_AVATAR_BYTES: ${{ vars.UPLOAD_MAX_AVATAR_BYTES }}
+        UPLOAD_MAX_CARD_ART_BYTES: ${{ vars.UPLOAD_MAX_CARD_ART_BYTES }}
+        UPLOAD_MAX_VOICE_BYTES: ${{ vars.UPLOAD_MAX_VOICE_BYTES }}
+        UPLOAD_MAX_VOICE_DURATION_MS: ${{ vars.UPLOAD_MAX_VOICE_DURATION_MS }}
+        EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+        EMAIL_REPLY_TO: ${{ vars.EMAIL_REPLY_TO }}
+        SMTP_HOST: ${{ vars.SMTP_HOST }}
+        SMTP_PORT: ${{ vars.SMTP_PORT }}
+        SMTP_SECURE: ${{ vars.SMTP_SECURE }}
+        MAILER_TRANSPORT: ${{ vars.MAILER_TRANSPORT }}
+        SMTP_USER: ${{ secrets.SMTP_USER }}
+        SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        GDPR_DELETION_GRACE_DAYS: ${{ vars.GDPR_DELETION_GRACE_DAYS }}
+        # Both are required by src/lib/env.ts and the build fails collecting
+        # page data without them.
+        CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        GUEST_SESSION_SECRET: ${{ secrets.GUEST_SESSION_SECRET }}
+        GUEST_SESSION_TTL_DAYS: ${{ vars.GUEST_SESSION_TTL_DAYS }}
+        SEED_SUPER_ADMIN_EMAIL: ${{ secrets.SEED_SUPER_ADMIN_EMAIL }}
+        SEED_SUPER_ADMIN_PASSWORD: ${{ secrets.SEED_SUPER_ADMIN_PASSWORD }}
+      run: |
+        cat > .env << EOF
+        NODE_ENV=production
+        NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
+        AUTH_URL=$AUTH_URL
+        DATABASE_URL=$DATABASE_URL
+        REDIS_URL=$REDIS_URL
+        PORT=$PORT
+        AUTH_SECRET=$AUTH_SECRET
+        AUTH_TRUST_HOST=$AUTH_TRUST_HOST
+        AUTH_GOOGLE_ID=$AUTH_GOOGLE_ID
+        AUTH_GOOGLE_SECRET=$AUTH_GOOGLE_SECRET
+        TOTP_SECRET_KEY=$TOTP_SECRET_KEY
+        TOTP_ISSUER=$TOTP_ISSUER
+        WEBAUTHN_RP_ID=$WEBAUTHN_RP_ID
+        WEBAUTHN_RP_NAME=$WEBAUTHN_RP_NAME
+        WEBAUTHN_ORIGIN=$WEBAUTHN_ORIGIN
+        FEATURE_WEBAUTHN=$FEATURE_WEBAUTHN
+        RECAPTCHA_SECRET_KEY=$RECAPTCHA_SECRET_KEY
+        RECAPTCHA_MIN_SCORE=$RECAPTCHA_MIN_SCORE
+        CSP_RELAX_FOR_HTTP=$CSP_RELAX_FOR_HTTP
+        STRIPE_SECRET_KEY=$STRIPE_SECRET_KEY
+        STRIPE_WEBHOOK_SECRET=$STRIPE_WEBHOOK_SECRET
+        STRIPE_API_VERSION=$STRIPE_API_VERSION
+        CARD_UNLOCK_PRICE_CENTS=$CARD_UNLOCK_PRICE_CENTS
+        CARD_UNLOCK_CURRENCY=$CARD_UNLOCK_CURRENCY
+        STRIPE_CHECKOUT_SUCCESS_URL=$STRIPE_CHECKOUT_SUCCESS_URL
+        STRIPE_CHECKOUT_CANCEL_URL=$STRIPE_CHECKOUT_CANCEL_URL
+        FIREBASE_SERVICE_ACCOUNT_JSON=$FIREBASE_SERVICE_ACCOUNT_JSON
+        FIREBASE_STORAGE_BUCKET=$FIREBASE_STORAGE_BUCKET
+        S3_BUCKET=$S3_BUCKET
+        S3_REGION=$S3_REGION
+        S3_ACCESS_URL=$S3_ACCESS_URL
+        UPLOAD_URL_TTL=$UPLOAD_URL_TTL
+        NEXT_PUBLIC_FIREBASE_API_KEY=$NEXT_PUBLIC_FIREBASE_API_KEY
+        NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=$NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN
+        NEXT_PUBLIC_FIREBASE_PROJECT_ID=$NEXT_PUBLIC_FIREBASE_PROJECT_ID
+        NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=$NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET
+        NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=$NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID
+        NEXT_PUBLIC_FIREBASE_APP_ID=$NEXT_PUBLIC_FIREBASE_APP_ID
+        NEXT_PUBLIC_FIREBASE_VAPID_KEY=$NEXT_PUBLIC_FIREBASE_VAPID_KEY
+        UPLOAD_MAX_AVATAR_BYTES=$UPLOAD_MAX_AVATAR_BYTES
+        UPLOAD_MAX_CARD_ART_BYTES=$UPLOAD_MAX_CARD_ART_BYTES
+        UPLOAD_MAX_VOICE_BYTES=$UPLOAD_MAX_VOICE_BYTES
+        UPLOAD_MAX_VOICE_DURATION_MS=$UPLOAD_MAX_VOICE_DURATION_MS
+        EMAIL_FROM=$EMAIL_FROM
+        EMAIL_REPLY_TO=$EMAIL_REPLY_TO
+        SMTP_HOST=$SMTP_HOST
+        SMTP_PORT=$SMTP_PORT
+        SMTP_SECURE=$SMTP_SECURE
+        SMTP_USER=$SMTP_USER
+        SMTP_PASSWORD=$SMTP_PASSWORD
+        MAILER_TRANSPORT=$MAILER_TRANSPORT
+        CRON_SECRET=$CRON_SECRET
+        GDPR_DELETION_GRACE_DAYS=$GDPR_DELETION_GRACE_DAYS
+        GUEST_SESSION_SECRET=$GUEST_SESSION_SECRET
+        GUEST_SESSION_TTL_DAYS=$GUEST_SESSION_TTL_DAYS
+        SEED_SUPER_ADMIN_EMAIL=$SEED_SUPER_ADMIN_EMAIL
+        SEED_SUPER_ADMIN_PASSWORD=$SEED_SUPER_ADMIN_PASSWORD
+        SKIP_MIGRATE=
+        SKIP_SEED=true
+        EOF
+
+    - name: Database Migrations
+      run: yarn prisma migrate deploy
+
+    - name: Run Build
+      # Auto-size the V8 heap to half the box's RAM (min 1024, max 4096 MB) so
+      # the build cannot OOM-kill the runner agent on this shared host.
+      run: |
+        TOTAL_MB=$(free -m | awk '/^Mem:/{print $2}')
+        HEAP=$(( TOTAL_MB / 2 ))
+        if [ "$HEAP" -lt 1024 ]; then HEAP=1024; fi
+        if [ "$HEAP" -gt 4096 ]; then HEAP=4096; fi
+        echo "Total RAM ${TOTAL_MB}MB -> Node heap ${HEAP}MB"
+        export NODE_OPTIONS="--max-old-space-size=${HEAP}"
+        yarn build
+
+    - name: Stop previous PM2 instances
+      run: |
+        npx pm2 delete sophionix-app || true
+        npx pm2 delete sophionix-worker || true
+      continue-on-error: true
+
+    - name: Starting Application with PM2
+      # HOSTNAME=0.0.0.0 is required. Next's standalone server otherwise binds
+      # to the machine hostname, so nginx's proxy_pass to 127.0.0.1:3000 is
+      # refused and every request 502s — the Jul 2026 outage.
+      #
+      # `cp -r src dest/` nests as dest/src when dest exists, so the trailing
+      # `/.` and target `/` copy CONTENTS and stay idempotent across reruns.
+      run: |
+        mkdir -p .next/standalone/public .next/standalone/.next/static
+        cp -r public/. .next/standalone/public/
+        cp -r .next/static/. .next/standalone/.next/static/
+        HOSTNAME=0.0.0.0 PORT="${{ vars.PORT || '3000' }}" \
+          npx pm2 start .next/standalone/server.js --name "sophionix-app" -f --update-env
+
+    - name: Starting Worker with PM2
+      run: npx pm2 start "yarn worker:start" --name "sophionix-worker" -f --update-env
+
+    - name: Health check
+      # Without this the deploy reports success even when the app never came
+      # up — which is how a week of green checkmarks hid a dead site.
+      run: |
+        PORT="${{ vars.PORT || '3000' }}"
+        for i in $(seq 1 30); do
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${PORT}/" || true)
+          case "$CODE" in
+            200|301|302|307|308)
+              echo "App healthy on port ${PORT} (HTTP ${CODE}) after ${i}s"
+              exit 0
+              ;;
+          esac
+          sleep 1
+        done
+        echo "::error::App did not become healthy on port ${PORT} within 30s (last HTTP ${CODE:-000})."
+        npx pm2 logs sophionix-app --err --lines 40 --nostream || true
+        exit 1
+
+    - name: Persist PM2 process list
+      run: npx pm2 save

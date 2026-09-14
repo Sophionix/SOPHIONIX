@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+
+# Node
+node_modules
+.next
+out
+dist
+coverage
+
+# Yarn
+.yarn/install-state.gz
+.yarn/cache
+!.yarn/sdks
+!.yarn/versions
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# Development
+.claude
+.planning
+.vscode
+.idea
+*.md
+*.log
+.DS_Store
+
+# Docker
+docker-compose*.yml
+Dockerfile
+
+# Tests & scripts not needed at build time
+scripts/smoke-db.ts
+
+# Workers are not built into standalone yet
+# (remove this line once workers are compiled/bundled)
+src/workers

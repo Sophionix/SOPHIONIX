@@ -1,0 +1,35 @@
+name: Seed Test Accounts
+
+# Manually-triggered helper that runs scripts/create-test-accounts.ts on the
+# self-hosted runner. It deliberately does NOT checkout: the workspace already
+# holds the deployed tree (node_modules, generated Prisma client and .env with
+# DATABASE_URL + GUEST_SESSION_SECRET) from the last successful Sophionix
+# Pipeline run, and a checkout would wipe .env and the built output. Push any
+# change to scripts/create-test-accounts.ts through the normal pipeline first so
+# the workspace copy is up to date, then dispatch this.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "seed = create/refresh the demo accounts, delete = remove them"
+        type: choice
+        options:
+          - seed
+          - delete
+        default: seed
+
+jobs:
+  seed:
+    runs-on: self-hosted
+    steps:
+    - name: Run the seeder
+      working-directory: ${{ github.workspace }}
+      run: |
+        if [ ! -f .env ]; then
+          echo "::error::.env not found in the workspace — run the Sophionix Pipeline (deploy) once first."
+          exit 1
+        fi
+        FLAG=""
+        if [ "${{ github.event.inputs.action }}" = "delete" ]; then FLAG="--delete"; fi
+        node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/create-test-accounts.ts $FLAG
