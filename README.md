@@ -1,4 +1,4 @@
-# Sophionix V3
+A# Sophionix V3
 
 Self-guided contemplation journal web app for emotional healing via visual oracle cards, journaling, and guided journeys.
 
