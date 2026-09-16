@@ -12,8 +12,8 @@ const cspRelaxForHttp = process.env.CSP_RELAX_FOR_HTTP === "true";
 
 const scriptSrc =
   isDev || cspRelaxForHttp
-    ? `'self' 'unsafe-inline' 'unsafe-eval' https://www.google.com/recaptcha/ https://www.gstatic.com/recaptcha/`
-    : `'self' https://www.google.com/recaptcha/ https://www.gstatic.com/recaptcha/`;
+    ? `'self' 'unsafe-inline' 'unsafe-eval' https://www.google.com/recaptcha/ https://www.gstatic.com/recaptcha/ https://storage.googleapis.com`
+    : `'self' https://www.google.com/recaptcha/ https://www.gstatic.com/recaptcha/ https://storage.googleapis.com`;
 
 const cspDirectives = [
   `default-src 'self'`,
