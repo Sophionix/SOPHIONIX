@@ -41,7 +41,7 @@ COPY package.json yarn.lock .yarnrc.yml ./
 
 # Install dependencies with immutable lockfile.
 # Uses BuildKit cache mount for Yarn's global cache.
-RUN --mount=type=cache,id=cacheKey=yarn_cache,target=/usr/local/share/.cache/yarn \
+RUN --mount=type=cache,id=s/96fdb2da-253d-480d-9cca-f767c9fee635-/usr/local/share/.cache/yarn,target=/usr/local/share/.cache/yarn \
     yarn install --immutable
 
 # -----------------------------------------------------------------------------
